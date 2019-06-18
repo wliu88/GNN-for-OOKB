@@ -136,9 +136,11 @@ def generator_train_with_corruption(args):
         h, r, t = train_data[i]
         if args.is_balanced_tr:
             # if negative sampling (corruption) is based on balanced (reflect frequency of relations)
-            if random.random() > trfreq[r]: continue
+            if random.random() > trfreq[r]:
+                continue
         else:
-            if random.random() > skip_rate: continue
+            if random.random() > skip_rate:
+                continue
 
         # tph/Z
         head_ratio = 0.5
@@ -172,6 +174,7 @@ def generator_train_with_corruption(args):
 
 def train(args, m, xp, opt):
     Loss, N = list(), 0
+    # iterate through the training data while sample negative examples and create batches
     for positive, negative in generator_train_with_corruption(args):
         loss = m.train(positive, negative, train_link, gold_relations, aux_link, xp)
         loss.backward()
@@ -184,8 +187,10 @@ def train(args, m, xp, opt):
 
 def dump_current_scores_of_devtest(args, m, xp):
     for mode in ['dev', 'test']:
-        if mode == 'dev':    current_data = dev_data
-        if mode == 'test':    current_data = test_data
+        if mode == 'dev':
+            current_data = dev_data
+        if mode == 'test':
+            current_data = test_data
 
         scores, accuracy = list(), list()
         for batch in chunked(current_data, args.test_batch_size):

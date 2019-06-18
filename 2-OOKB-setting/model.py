@@ -138,25 +138,34 @@ class Tunnel(chainer.Chain):
     """
 
     def __call__(self, x, neighbor_entities, neighbor_dict, assign, entities, relations):
+        print("Call Tunnel object, layer: ", self.layer)
         if self.layer == 0:
             return self.easy_case(x, neighbor_entities, neighbor_dict, assign, entities, relations)
 
         if len(neighbor_dict) == 1:
             x = [x]
         else:
-            x = F.split_axis(x, len(neighbor_dict), axis=0)
+            # Weiyu: Modified from len(neighbor_dict) to len(neighbor_entities) for easier reading
+            #        Use assert to make these two are equivalent
+            assert len(neighbor_dict) == len(neighbor_entities)
+            # x: [len(neighbor_entities) x args.dim]
+            # split the given variable into a tuple of variables by row (axis=0)
+            x = F.split_axis(x, len(neighbor_entities), axis=0)
+
 
         assignR = dict()
         bundle = defaultdict(list)
-        for v, k in enumerate(neighbor_entities):
-            for i in assign[v]:
+        for neighbor_index, neighbor_entity in enumerate(neighbor_entities):
+            # find entities that have the neighbor_entity as neighbor using assign dictionary
+            for i in assign[neighbor_index]:
                 e = entities[i]
-                if (e, k) in relations:
-                    r = relations[(e, k)] * 2
+                if (e, neighbor_entity) in relations:
+                    r = relations[(e, neighbor_entity)] * 2
                 else:
-                    r = relations[(k, e)] * 2 + 1
-                assignR[(r, len(bundle[r]))] = v
-                bundle[r].append(x[v])
+                    r = relations[(neighbor_entity, e)] * 2 + 1
+                assignR[(r, len(bundle[r]))] = neighbor_index
+                bundle[r].append(x[neighbor_index])
+        print("assignR", assignR)
 
         result = [0 for i in range(len(neighbor_dict))]
         for r in bundle:
@@ -207,11 +216,26 @@ class Model(chainer.Chain):
         if args.use_gpu: self.to_gpu()
 
     def get_context(self, entities, train_link, relations, aux_link, order, xp):
+        """
+        :param entities: entities in both train and aux
+        :param train_link: mapping from an entity to its neighbors in train
+        :param relations:
+        :param aux_link:
+        :param order:
+        :param xp:
+        :return:
+        """
+
         if self.depth == order:
+            # input size: B; output size: B x d
             return self.embedE(xp.array(entities, 'i'))
 
+        # mapping from a neighboring index of an entity to the entity index of another entity if they are neighbors
         assign = defaultdict(list)
+
+        # mapping from a neighboring entity to a neighboring index
         neighbor_dict = defaultdict(int)
+
         for i, e in enumerate(entities):
             """
             (not self.is_known)
@@ -222,6 +246,7 @@ class Model(chainer.Chain):
                 in first connection
             """
             if e in train_link:
+                # sample neighbors if #neighbors exceed the limit
                 if len(train_link[e]) <= self.sample_size:
                     nn = train_link[e]
                 else:
@@ -239,14 +264,20 @@ class Model(chainer.Chain):
                     print('something wrong @ modelS')
                     print('entity not in aux_link', e, order)
                     sys.exit(1)
+
             for k in nn:
                 if k not in neighbor_dict:
                     neighbor_dict[k] = len(neighbor_dict)  # (k,v)
                 assign[neighbor_dict[k]].append(i)
+
+        # all the neighbors (non-repeating) of input entities
         neighbor = []
-        for k, v in sorted(neighbor_dict.items(), key=lambda x: x[1]):
-            neighbor.append(k)
+        # sort neighboring entities by their time of appearance
+        for sorted_k, sorted_v in sorted(neighbor_dict.items(), key=lambda x: x[1]):
+            neighbor.append(sorted_k)
+
         x = self.get_context(neighbor, train_link, relations, aux_link, order + 1, xp)
+        # call the order-th Tunnel object
         x = getattr(self, self.forwardB[order][0])(x, neighbor, neighbor_dict, assign, entities, relations)
         return x
 
