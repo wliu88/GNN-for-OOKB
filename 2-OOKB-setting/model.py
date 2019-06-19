@@ -10,6 +10,9 @@ import sys, random
 
 
 class Module(chainer.Chain):
+    """
+    One layer of transition function: linear + (batch norm) + nonlinear.
+    """
     def __init__(self, dim):
         super(Module, self).__init__(
             x2z=L.Linear(dim, dim),
@@ -24,6 +27,9 @@ class Module(chainer.Chain):
 
 
 class Block(chainer.Chain):
+    """
+    Block and Module together define the transition function.
+    """
     def __init__(self, dim, layer):
         super(Block, self).__init__()
         links = [('m{}'.format(i), Module(dim)) for i in range(layer)]
@@ -38,12 +44,20 @@ class Block(chainer.Chain):
 
 
 class Tunnel(chainer.Chain):
+    """
+    Tunnel is the transition model. Current setup defines two transition functions in the transition model, one for head
+    entity and one for tail entity.
+    """
     def __init__(self, dim, layer, relation_size, pooling_method):
         super(Tunnel, self).__init__()
+
+        # transition function for head entities that are neighbor of the anchor entity
         linksH = [('h{}'.format(i), Block(dim, layer)) for i in range(relation_size)]
         for link in linksH:
             self.add_link(*link)
         self.forwardH = linksH
+
+        # transition function for tail entities that are neighbors of the anchor entity
         linksT = [('t{}'.format(i), Block(dim, layer)) for i in range(relation_size)]
         for link in linksT:
             self.add_link(*link)
@@ -82,10 +96,19 @@ class Tunnel(chainer.Chain):
         return result
 
     def sumpooling(self, xs, neighbor):
+        """
+
+        :param xs: result for each neighbor entity
+        :param neighbor: maps from a neighbor index to the index of its anchor entity
+        :return:
+        """
+        # sources is defined for each anchor entity
         sources = defaultdict(list)
         for ee in neighbor:
+            # i is the entity that has ee as neighbor
             for i in neighbor[ee]:
                 sources[i].append(xs[ee])
+        # result is defined for each anchor entity
         result = []
         for i, xxs in sorted(sources.items(), key=lambda x: x[0]):
             if len(xxs) == 1:
@@ -138,7 +161,7 @@ class Tunnel(chainer.Chain):
     """
 
     def __call__(self, x, neighbor_entities, neighbor_dict, assign, entities, relations):
-        print("Call Tunnel object, layer: ", self.layer)
+        # print("Call Tunnel object, layer: ", self.layer)
         if self.layer == 0:
             return self.easy_case(x, neighbor_entities, neighbor_dict, assign, entities, relations)
 
@@ -152,11 +175,17 @@ class Tunnel(chainer.Chain):
             # split the given variable into a tuple of variables by row (axis=0)
             x = F.split_axis(x, len(neighbor_entities), axis=0)
 
-
+        # assignR maps from a neighbor entity's index with respect to a relation to the index within the whole neighbor
+        # entities list.
         assignR = dict()
+        # bundle maps from a relation to all neighbor entities that are connected by that relation. This allows easy
+        # propagation since a propagation function is specified for each relation.
         bundle = defaultdict(list)
         for neighbor_index, neighbor_entity in enumerate(neighbor_entities):
-            # find entities that have the neighbor_entity as neighbor using assign dictionary
+            # The following block finds an anchor entity using assign dictionary, then find the relation between the
+            # anchor entity and the neighbor entity
+
+            # i is the entity index of the anchor entity
             for i in assign[neighbor_index]:
                 e = entities[i]
                 if (e, neighbor_entity) in relations:
@@ -165,8 +194,8 @@ class Tunnel(chainer.Chain):
                     r = relations[(neighbor_entity, e)] * 2 + 1
                 assignR[(r, len(bundle[r]))] = neighbor_index
                 bundle[r].append(x[neighbor_index])
-        print("assignR", assignR)
 
+        # result is computed for each neighbor entity by propagating once.
         result = [0 for i in range(len(neighbor_dict))]
         for r in bundle:
             rx = bundle[r]
@@ -188,6 +217,7 @@ class Tunnel(chainer.Chain):
                 for i, x in enumerate(rx):
                     result[assignR[(r, i)]] = x
 
+        # compute result for anchor entities by pooling results for neighbor entities
         if self.pooling_method == 'max':
             result = self.maxpooling(result, assign)
         if self.pooling_method == 'avg':
@@ -217,8 +247,12 @@ class Model(chainer.Chain):
 
     def get_context(self, entities, train_link, relations, aux_link, order, xp):
         """
+        WL: To help understand the code, define two types of entities: anchor entity and neighbor entity. An anchor
+        entity is connected to multiple neighbor entities. The overall goal is to propagate information from neighbor
+        entities to anchor entities.
+
         :param entities: entities in both train and aux
-        :param train_link: mapping from an entity to its neighbors in train
+        :param train_link: mapping from an anchor entity to its neighbors in train
         :param relations:
         :param aux_link:
         :param order:
@@ -230,10 +264,11 @@ class Model(chainer.Chain):
             # input size: B; output size: B x d
             return self.embedE(xp.array(entities, 'i'))
 
-        # mapping from a neighboring index of an entity to the entity index of another entity if they are neighbors
+        # mapping from a neighbor index to the entity index of the anchor entity.
+        # This keeps track of the connections of the graph.
         assign = defaultdict(list)
 
-        # mapping from a neighboring entity to a neighboring index
+        # mapping from a neighbor entity to the neighbor index. This helps organize all neighbor entities.
         neighbor_dict = defaultdict(int)
 
         for i, e in enumerate(entities):
@@ -246,7 +281,7 @@ class Model(chainer.Chain):
                 in first connection
             """
             if e in train_link:
-                # sample neighbors if #neighbors exceed the limit
+                # sample neighbors if number of neighbors exceed the limit
                 if len(train_link[e]) <= self.sample_size:
                     nn = train_link[e]
                 else:
@@ -270,9 +305,9 @@ class Model(chainer.Chain):
                     neighbor_dict[k] = len(neighbor_dict)  # (k,v)
                 assign[neighbor_dict[k]].append(i)
 
-        # all the neighbors (non-repeating) of input entities
+        # the list of all neighbors (non-repeating) of anchor entities
         neighbor = []
-        # sort neighboring entities by their time of appearance
+        # sort neighbor entities by their indices
         for sorted_k, sorted_v in sorted(neighbor_dict.items(), key=lambda x: x[1]):
             neighbor.append(sorted_k)
 
@@ -294,28 +329,38 @@ class Model(chainer.Chain):
 
         entities = list(entities)
 
+        # complete one propagation of information from neighbor entities to anchor entities
         x = self.get_context(entities, train_link, relations, aux_link, 0, xp)
         x = F.split_axis(x, len(entities), axis=0)
+        # edict maps from an entity to its result
         edict = dict()
         for e, x in zip(entities, x):
             edict[e] = x
 
+        # positives
         pos, rels = [], []
         for h, r, t in positive:
             rels.append(r)
             pos.append(edict[h] - edict[t])
         pos = F.concat(pos, axis=0)
         xr = F.tanh(self.embedR(xp.array(rels, 'i')))
+        # TransE score function
+        # batch_l2_norm_squared aka Euclidean norm for batches
+        # f_pos = ||h + r - t||
         pos = F.batch_l2_norm_squared(pos + xr)
 
+        # negatives
         neg, rels = [], []
         for h, r, t in negative:
             rels.append(r)
             neg.append(edict[h] - edict[t])
         neg = F.concat(neg, axis=0)
         xr = F.tanh(self.embedR(xp.array(rels, 'i')))
+        # TransE score function
+        # f_neg = ||h + r -t||
         neg = F.batch_l2_norm_squared(neg + xr)
 
+        # Absolute Margin Objective Function
         return sum(pos + F.relu(self.threshold - neg))
 
     def get_scores(self, candidates, train_link, relations, aux_link, xp, mode):
@@ -335,5 +380,7 @@ class Model(chainer.Chain):
             diffs.append(edict[h] - edict[t])
         diffs = F.concat(diffs, axis=0)
         xr = F.tanh(self.embedR(xp.array(rels, 'i')))
+        # TransE score function
+        # f = || h + r - t ||
         scores = F.batch_l2_norm_squared(diffs + xr)
         return scores

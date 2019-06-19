@@ -193,6 +193,7 @@ def dump_current_scores_of_devtest(args, m, xp):
             current_data = test_data
 
         scores, accuracy = list(), list()
+        # more_itertools.chunked(iterable, n) breaks iterable into lists of length n:
         for batch in chunked(current_data, args.test_batch_size):
             with chainer.using_config('train', False), chainer.no_backprop_mode():
                 current_score = m.get_scores(batch, train_link, gold_relations, aux_link, xp, mode)
